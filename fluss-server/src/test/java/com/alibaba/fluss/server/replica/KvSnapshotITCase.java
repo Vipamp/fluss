@@ -92,7 +92,7 @@ class KvSnapshotITCase {
     }
 
     @Test
-    void testKvSnapshot() throws Exception {
+    void testKvSnapshotAndDeleteForTabletServer() throws Exception {
         // test snapshot for multiple table
         int tableNum = 3;
         List<TableBucket> tableBuckets = new ArrayList<>();
@@ -207,7 +207,7 @@ class KvSnapshotITCase {
     }
 
     @Test
-    void testKvSnapshotAndDeleteTable() throws Exception {
+    void testKvSnapshotAndDeleteForCoordinatorServer() throws Exception {
         List<TableBucket> tableBuckets = new ArrayList<>();
         TablePath tablePath = TablePath.of("test_db", "test_table");
         long tableId =
