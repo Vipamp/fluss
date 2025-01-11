@@ -19,7 +19,6 @@ package com.alibaba.fluss.client.lookup;
 import com.alibaba.fluss.annotation.Internal;
 import com.alibaba.fluss.exception.FlussRuntimeException;
 import com.alibaba.fluss.metadata.TableBucket;
-import com.alibaba.fluss.rpc.messages.PbValue;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -51,21 +50,21 @@ public class LookupBatch {
     }
 
     /** Complete the lookup operations using given values . */
-    public void complete(List<PbValue> pbValues) {
+    public void complete(List<byte[]> values) {
         // if the size of return values of lookup operation are not equal to the number of lookups,
         // should complete an exception.
-        if (pbValues.size() != lookups.size()) {
+        if (values.size() != lookups.size()) {
             completeExceptionally(
                     new FlussRuntimeException(
                             String.format(
                                     "The number of return values of lookup operation is not equal to the number of "
                                             + "lookups. Return %d values, but expected %d.",
-                                    pbValues.size(), lookups.size())));
+                                    values.size(), lookups.size())));
         } else {
-            for (int i = 0; i < pbValues.size(); i++) {
-                Lookup lookup = lookups.get(i);
-                PbValue pbValue = pbValues.get(i);
-                lookup.future().complete(pbValue.hasValues() ? pbValue.getValues() : null);
+            for (int i = 0; i < values.size(); i++) {
+                AbstractLookup<byte[]> lookup = lookups.get(i);
+                // single value.
+                lookup.future().complete(values.get(i));
             }
         }
     }

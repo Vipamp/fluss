@@ -30,6 +30,7 @@ import com.alibaba.fluss.exception.NotLeaderOrFollowerException;
 import com.alibaba.fluss.fs.FsPath;
 import com.alibaba.fluss.metadata.KvFormat;
 import com.alibaba.fluss.metadata.LogFormat;
+import com.alibaba.fluss.metadata.MergeEngine;
 import com.alibaba.fluss.metadata.PhysicalTablePath;
 import com.alibaba.fluss.metadata.Schema;
 import com.alibaba.fluss.metadata.TableBucket;
@@ -67,6 +68,7 @@ import com.alibaba.fluss.server.log.ListOffsetsParam;
 import com.alibaba.fluss.server.log.LogAppendInfo;
 import com.alibaba.fluss.server.log.LogManager;
 import com.alibaba.fluss.server.log.LogOffsetMetadata;
+import com.alibaba.fluss.server.log.LogOffsetSnapshot;
 import com.alibaba.fluss.server.log.LogReadInfo;
 import com.alibaba.fluss.server.log.LogTablet;
 import com.alibaba.fluss.server.log.checkpoint.OffsetCheckpointFile;
@@ -74,9 +76,10 @@ import com.alibaba.fluss.server.log.remote.RemoteLogManager;
 import com.alibaba.fluss.server.metadata.ServerMetadataCache;
 import com.alibaba.fluss.server.metrics.group.BucketMetricGroup;
 import com.alibaba.fluss.server.metrics.group.PhysicalTableMetricGroup;
+import com.alibaba.fluss.server.replica.delay.DelayedFetchLog;
 import com.alibaba.fluss.server.replica.delay.DelayedOperationManager;
+import com.alibaba.fluss.server.replica.delay.DelayedTableBucketKey;
 import com.alibaba.fluss.server.replica.delay.DelayedWrite;
-import com.alibaba.fluss.server.replica.delay.DelayedWriteKey;
 import com.alibaba.fluss.server.utils.FatalErrorHandler;
 import com.alibaba.fluss.server.zk.ZkSequenceIDCounter;
 import com.alibaba.fluss.server.zk.ZooKeeperClient;
@@ -157,6 +160,7 @@ public final class Replica {
 
     private final int localTabletServerId;
     private final DelayedOperationManager<DelayedWrite<?>> delayedWriteManager;
+    private final DelayedOperationManager<DelayedFetchLog> delayedFetchLogManager;
     /** The manger to manger the isr expand and shrink. */
     private final AdjustIsrManager adjustIsrManager;
 
@@ -164,6 +168,7 @@ public final class Replica {
     private final Schema schema;
     private final LogFormat logFormat;
     private final KvFormat kvFormat;
+    private final @Nullable MergeEngine mergeEngine;
     private final long logTTLMs;
     private final boolean dataLakeEnabled;
     private final int tieredLogLocalSegments;
@@ -202,6 +207,7 @@ public final class Replica {
             int localTabletServerId,
             OffsetCheckpointFile.LazyOffsetCheckpoints lazyHighWatermarkCheckpoint,
             DelayedOperationManager<DelayedWrite<?>> delayedWriteManager,
+            DelayedOperationManager<DelayedFetchLog> delayedFetchLogManager,
             AdjustIsrManager adjustIsrManager,
             SnapshotContext snapshotContext,
             ServerMetadataCache metadataCache,
@@ -218,6 +224,7 @@ public final class Replica {
         this.minInSyncReplicas = minInSyncReplicas;
         this.localTabletServerId = localTabletServerId;
         this.delayedWriteManager = delayedWriteManager;
+        this.delayedFetchLogManager = delayedFetchLogManager;
         this.adjustIsrManager = adjustIsrManager;
         this.fatalErrorHandler = fatalErrorHandler;
         this.bucketMetricGroup = bucketMetricGroup;
@@ -227,6 +234,7 @@ public final class Replica {
         this.logTTLMs = tableDescriptor.getLogTTLMs();
         this.dataLakeEnabled = tableDescriptor.isDataLakeEnabled();
         this.tieredLogLocalSegments = tableDescriptor.getTieredLogLocalSegments();
+        this.mergeEngine = tableDescriptor.getMergeEngine();
         this.partitionKeys = tableDescriptor.getPartitionKeys();
         this.snapshotContext = snapshotContext;
         // create a closeable registry for the replica
@@ -483,6 +491,15 @@ public final class Replica {
         }
     }
 
+    public LogOffsetSnapshot fetchOffsetSnapshot(boolean fetchOnlyFromLeader) throws IOException {
+        return inReadLock(
+                leaderIsrUpdateLock,
+                () -> {
+                    LogTablet logTablet = localLogOrThrow(fetchOnlyFromLeader);
+                    return logTablet.fetchOffsetSnapshot();
+                });
+    }
+
     // -------------------------------------------------------------------------------------------
 
     private void onBecomeNewLeader() {
@@ -588,7 +605,9 @@ public final class Replica {
                 LOG.info("No snapshot found, restore from log.");
                 // actually, kv manager always create a kv tablet since we will drop the kv
                 // if it exists before init kv tablet
-                kvTablet = kvManager.getOrCreateKv(physicalPath, tableBucket, logTablet, kvFormat);
+                kvTablet =
+                        kvManager.getOrCreateKv(
+                                physicalPath, tableBucket, logTablet, kvFormat, mergeEngine);
             }
             logTablet.updateMinRetainOffset(restoreStartOffset);
             recoverKvTablet(restoreStartOffset);
@@ -779,8 +798,14 @@ public final class Replica {
                     // TODO WRITE a leader epoch.
                     LogAppendInfo appendInfo = logTablet.appendAsLeader(memoryLogRecords);
 
-                    // we may need to increment high watermark.
-                    maybeIncrementLeaderHW(logTablet, System.currentTimeMillis());
+                    // we may need to increment high watermark if isr could be down to 1 or the
+                    // replica count is 1.
+                    boolean hwIncreased =
+                            maybeIncrementLeaderHW(logTablet, System.currentTimeMillis());
+
+                    if (hwIncreased) {
+                        tryCompleteDelayedOperations();
+                    }
 
                     return appendInfo;
                 });
@@ -1028,6 +1053,36 @@ public final class Replica {
                 });
     }
 
+    public List<byte[]> prefixLookup(byte[] prefixKey) {
+        if (!isKvTable()) {
+            throw new NonPrimaryKeyTableException(
+                    "Try to do prefix lookup on a non primary key table: " + getTablePath());
+        }
+
+        return inReadLock(
+                leaderIsrUpdateLock,
+                () -> {
+                    try {
+                        if (!isLeader()) {
+                            throw new NotLeaderOrFollowerException(
+                                    String.format(
+                                            "Leader not local for bucket %s on tabletServer %d",
+                                            tableBucket, localTabletServerId));
+                        }
+                        checkNotNull(
+                                kvTablet, "KvTablet for the replica to get key shouldn't be null.");
+                        return kvTablet.prefixLookup(prefixKey);
+                    } catch (IOException e) {
+                        String errorMsg =
+                                String.format(
+                                        "Failed to do prefix lookup from local kv for table bucket %s, the cause is: %s",
+                                        tableBucket, e.getMessage());
+                        LOG.error(errorMsg, e);
+                        throw new KvStorageException(errorMsg, e);
+                    }
+                });
+    }
+
     public DefaultValueRecordBatch limitKvScan(int limit) {
         if (!isKvTable()) {
             throw new NonPrimaryKeyTableException(
@@ -1234,8 +1289,9 @@ public final class Replica {
     }
 
     private void tryCompleteDelayedOperations() {
-        DelayedWriteKey delayedWriteKey = new DelayedWriteKey(tableBucket);
-        delayedWriteManager.checkAndComplete(delayedWriteKey);
+        DelayedTableBucketKey delayedTableBucketKey = new DelayedTableBucketKey(tableBucket);
+        delayedWriteManager.checkAndComplete(delayedTableBucketKey);
+        delayedFetchLogManager.checkAndComplete(delayedTableBucketKey);
     }
 
     private void validateBucketEpoch(int requestBucketEpoch) {

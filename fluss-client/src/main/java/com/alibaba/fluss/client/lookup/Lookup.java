@@ -26,26 +26,21 @@ import java.util.concurrent.CompletableFuture;
  * from, the bytes of the key, and a future for the lookup operation.
  */
 @Internal
-public class Lookup {
+public class Lookup extends AbstractLookup<byte[]> {
 
-    private final TableBucket tableBucket;
-    private final byte[] key;
     private final CompletableFuture<byte[]> future;
 
     Lookup(TableBucket tableBucket, byte[] key) {
-        this.tableBucket = tableBucket;
-        this.key = key;
+        super(tableBucket, key);
         this.future = new CompletableFuture<>();
     }
 
-    public TableBucket tableBucket() {
-        return tableBucket;
+    @Override
+    public LookupType lookupType() {
+        return LookupType.LOOKUP;
     }
 
-    public byte[] key() {
-        return key;
-    }
-
+    @Override
     public CompletableFuture<byte[]> future() {
         return future;
     }

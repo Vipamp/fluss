@@ -20,6 +20,7 @@ import com.alibaba.fluss.annotation.Internal;
 import com.alibaba.fluss.annotation.PublicEvolving;
 import com.alibaba.fluss.metadata.KvFormat;
 import com.alibaba.fluss.metadata.LogFormat;
+import com.alibaba.fluss.metadata.MergeEngine;
 import com.alibaba.fluss.utils.ArrayUtils;
 
 import java.time.Duration;
@@ -385,6 +386,14 @@ public class ConfigOptions {
                             "The purge number (in number of requests) of the write operation manager, "
                                     + "the default value is 1000.");
 
+    public static final ConfigOption<Integer> LOG_REPLICA_FETCH_OPERATION_PURGE_NUMBER =
+            key("log.replica.fetch-operation-purge-number")
+                    .intType()
+                    .defaultValue(1000)
+                    .withDescription(
+                            "The purge number (in number of requests) of the fetch log operation manager, "
+                                    + "the default value is 1000.");
+
     public static final ConfigOption<Integer> LOG_REPLICA_FETCHER_NUMBER =
             key("log.replica.fetcher-number")
                     .intType()
@@ -397,31 +406,54 @@ public class ConfigOptions {
                                     + "tablet server at the cost of higher CPU and memory utilization.");
 
     public static final ConfigOption<Duration> LOG_REPLICA_FETCH_BACKOFF_INTERVAL =
-            key("log.replica.fetch-backoff-interval")
+            key("log.replica.fetch.backoff-interval")
                     .durationType()
                     .defaultValue(Duration.ofSeconds(1))
-                    .withDescription("The amount of time to sleep when fetch bucket error occurs.");
+                    .withDescription("The amount of time to sleep when fetch bucket error occurs.")
+                    .withFallbackKeys("log.replica.fetch-backoff-interval");
 
-    public static final ConfigOption<MemorySize> LOG_FETCH_MAX_BYTES =
-            key("log.fetch.max-bytes")
+    public static final ConfigOption<MemorySize> LOG_REPLICA_FETCH_MAX_BYTES =
+            key("log.replica.fetch.max-bytes")
                     .memoryType()
                     .defaultValue(MemorySize.parse("16mb"))
                     .withDescription(
-                            "The maximum amount of data the server should return for a fetch request. "
-                                    + "Records are fetched in batches for log scanner or follower, for one request batch, "
-                                    + "and if the first record batch in the first non-empty bucket of the fetch is "
-                                    + "larger than this value, the record batch will still be returned to ensure that "
-                                    + "the fetch can make progress. As such, this is not a absolute maximum. Note that "
-                                    + "the fetcher performs multiple fetches in parallel.");
+                            "The maximum amount of data the server should return for a fetch request from follower. "
+                                    + "Records are fetched in batches, and if the first record batch in the first "
+                                    + "non-empty bucket of the fetch is larger than this value, the record batch "
+                                    + "will still be returned to ensure that the fetch can make progress. As such, "
+                                    + "this is not a absolute maximum. Note that the fetcher performs multiple fetches "
+                                    + "in parallel.")
+                    .withDeprecatedKeys("log.fetch.max-bytes");
 
-    public static final ConfigOption<MemorySize> LOG_FETCH_MAX_BYTES_FOR_BUCKET =
-            key("log.fetch.max-bytes-for-bucket")
+    public static final ConfigOption<MemorySize> LOG_REPLICA_FETCH_MAX_BYTES_FOR_BUCKET =
+            key("log.replica.fetch.max-bytes-for-bucket")
                     .memoryType()
                     .defaultValue(MemorySize.parse("1mb"))
                     .withDescription(
-                            "The maximum amount of data the server should return for a table bucket in fetch request. "
-                                    + "Records are fetched in batches for consumer or follower, for one request batch, "
-                                    + "the max bytes size is config by this option.");
+                            "The maximum amount of data the server should return for a table bucket in fetch request "
+                                    + "from follower. Records are fetched in batches, the max bytes size is "
+                                    + "config by this option.")
+                    .withDeprecatedKeys("log.fetch.max-bytes-for-bucket");
+
+    public static final ConfigOption<Duration> LOG_REPLICA_FETCH_WAIT_MAX_TIME =
+            key("log.replica.fetch.wait-max-time")
+                    .durationType()
+                    .defaultValue(Duration.ofMillis(500))
+                    .withDescription(
+                            "The maximum time to wait for enough bytes to be available for a fetch log request "
+                                    + "from follower to response. This value should always be less than the "
+                                    + "'log.replica.max-lag-time' at all times to prevent frequent shrinking of ISR for "
+                                    + "low throughput tables");
+
+    public static final ConfigOption<MemorySize> LOG_REPLICA_FETCH_MIN_BYTES =
+            key("log.replica.fetch.min-bytes")
+                    .memoryType()
+                    .defaultValue(MemorySize.parse("1b"))
+                    .withDescription(
+                            "The minimum bytes expected for each fetch log request from follower to response. "
+                                    + "If not enough bytes, wait up to "
+                                    + LOG_REPLICA_FETCH_WAIT_MAX_TIME.key()
+                                    + " time to return.");
 
     public static final ConfigOption<Integer> LOG_REPLICA_MIN_IN_SYNC_REPLICAS_NUMBER =
             key("log.replica.min-in-sync-replicas-number")
@@ -714,10 +746,48 @@ public class ConfigOptions {
                                     + "The Scanner will cache the records from each fetch request and returns "
                                     + "them incrementally from each poll.");
 
+    public static final ConfigOption<MemorySize> CLIENT_SCANNER_LOG_FETCH_MAX_BYTES =
+            key("client.scanner.log.fetch.max-bytes")
+                    .memoryType()
+                    .defaultValue(MemorySize.parse("16mb"))
+                    .withDescription(
+                            "The maximum amount of data the server should return for a fetch request from client. "
+                                    + "Records are fetched in batches, and if the first record batch in the first "
+                                    + "non-empty bucket of the fetch is larger than this value, the record batch "
+                                    + "will still be returned to ensure that the fetch can make progress. As such, "
+                                    + "this is not a absolute maximum.");
+
+    public static final ConfigOption<MemorySize> CLIENT_SCANNER_LOG_FETCH_MAX_BYTES_FOR_BUCKET =
+            key("client.scanner.log.fetch.max-bytes-for-bucket")
+                    .memoryType()
+                    .defaultValue(MemorySize.parse("1mb"))
+                    .withDescription(
+                            "The maximum amount of data the server should return for a table bucket in fetch request "
+                                    + "from client. Records are fetched in batches, the max bytes size is config by "
+                                    + "this option.");
+
+    public static final ConfigOption<Duration> CLIENT_SCANNER_LOG_FETCH_WAIT_MAX_TIME =
+            key("client.scanner.log.fetch.wait-max-time")
+                    .durationType()
+                    .defaultValue(Duration.ofMillis(500))
+                    .withDescription(
+                            "The maximum time to wait for enough bytes to be available for a fetch log "
+                                    + "request from client to response.");
+
+    public static final ConfigOption<MemorySize> CLIENT_SCANNER_LOG_FETCH_MIN_BYTES =
+            key("client.scanner.log.fetch.min-bytes")
+                    .memoryType()
+                    .defaultValue(MemorySize.parse("1b"))
+                    .withDescription(
+                            "The minimum bytes expected for each fetch log request from client to response. "
+                                    + "If not enough bytes, wait up to "
+                                    + CLIENT_SCANNER_LOG_FETCH_WAIT_MAX_TIME.key()
+                                    + " time to return.");
+
     public static final ConfigOption<Integer> CLIENT_LOOKUP_QUEUE_SIZE =
             key("client.lookup.queue-size")
                     .intType()
-                    .defaultValue(256)
+                    .defaultValue(25600)
                     .withDescription("The maximum number of pending lookup operations.");
 
     public static final ConfigOption<Integer> CLIENT_LOOKUP_MAX_BATCH_SIZE =
@@ -733,6 +803,14 @@ public class ConfigOptions {
                     .defaultValue(128)
                     .withDescription(
                             "The maximum number of unacknowledged lookup requests for lookup operations.");
+
+    public static final ConfigOption<Duration> CLIENT_LOOKUP_BATCH_TIMEOUT =
+            key("client.lookup.batch-timeout")
+                    .durationType()
+                    .defaultValue(Duration.ofMillis(100))
+                    .withDescription(
+                            "The maximum time to wait for the lookup batch to full, if this timeout is reached, "
+                                    + "the lookup batch will be closed to send.");
 
     public static final ConfigOption<Integer> CLIENT_SCANNER_REMOTE_LOG_PREFETCH_NUM =
             key("client.scanner.remote-log.prefetch-num")
@@ -890,6 +968,12 @@ public class ConfigOptions {
                             "Whether enable lakehouse storage for the table. Disabled by default. "
                                     + "When this option is set to ture and the datalake tiering service is up,"
                                     + " the table will be tiered and compacted into datalake format stored on lakehouse storage.");
+
+    public static final ConfigOption<MergeEngine> TABLE_MERGE_ENGINE =
+            key("table.merge-engine")
+                    .enumType(MergeEngine.class)
+                    .noDefaultValue()
+                    .withDescription("The merge engine for the primary key table.");
 
     // ------------------------------------------------------------------------
     //  ConfigOptions for Kv

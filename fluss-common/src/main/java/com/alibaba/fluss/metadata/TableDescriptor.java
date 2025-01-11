@@ -22,6 +22,7 @@ import com.alibaba.fluss.config.ConfigOption;
 import com.alibaba.fluss.config.ConfigOptions;
 import com.alibaba.fluss.config.Configuration;
 import com.alibaba.fluss.config.ConfigurationUtils;
+import com.alibaba.fluss.types.RowType;
 import com.alibaba.fluss.utils.AutoPartitionStrategy;
 import com.alibaba.fluss.utils.Preconditions;
 import com.alibaba.fluss.utils.json.JsonSerdeUtils;
@@ -127,11 +128,21 @@ public final class TableDescriptor implements Serializable {
                         .allMatch(e -> e.getKey() != null && e.getValue() != null),
                 "options cannot have null keys or values.");
 
+        if (getAutoPartitionStrategy().isAutoPartitionEnabled() && !isPartitioned()) {
+            throw new IllegalArgumentException(
+                    "Auto partition is only supported when table is partitioned.");
+        }
+
         if (hasPrimaryKey()
                 && getKvFormat() == KvFormat.COMPACTED
                 && getLogFormat() != LogFormat.ARROW) {
             throw new IllegalArgumentException(
                     "For Primary Key Table, if kv format is compacted, log format must be arrow.");
+        }
+
+        if (!hasPrimaryKey() && getMergeEngine() != null) {
+            throw new IllegalArgumentException(
+                    "Merge-engine is only supported in primary key table.");
         }
     }
 
@@ -150,10 +161,40 @@ public final class TableDescriptor implements Serializable {
         return schema;
     }
 
+    /** Returns the bucket key of the table, empty if no bucket key is set. */
     public List<String> getBucketKey() {
         return this.getTableDistribution()
                 .map(TableDescriptor.TableDistribution::getBucketKeys)
                 .orElse(Collections.emptyList());
+    }
+
+    /**
+     * Returns the indexes of the bucket key fields in the schema, empty if no bucket key is set.
+     */
+    public int[] getBucketKeyIndexes() {
+        List<String> bucketKey = getBucketKey();
+        RowType rowType = schema.toRowType();
+        int[] bucketKeyIndex = new int[bucketKey.size()];
+        for (int i = 0; i < bucketKey.size(); i++) {
+            bucketKeyIndex[i] = rowType.getFieldIndex(bucketKey.get(i));
+        }
+        return bucketKeyIndex;
+    }
+
+    /**
+     * Check if the table is using a default bucket key. A default bucket key is:
+     *
+     * <ul>
+     *   <li>the same as the primary keys excluding the partition keys.
+     *   <li>empty if the table is not a primary key table.
+     * </ul>
+     */
+    public boolean isDefaultBucketKey() {
+        if (schema.getPrimaryKey().isPresent()) {
+            return getBucketKey().equals(defaultBucketKeyOfPrimaryKeyTable(schema, partitionKeys));
+        } else {
+            return getBucketKey().isEmpty();
+        }
     }
 
     /**
@@ -242,6 +283,10 @@ public final class TableDescriptor implements Serializable {
     /** Whether the data lake is enabled. */
     public boolean isDataLakeEnabled() {
         return configuration().get(ConfigOptions.TABLE_DATALAKE_ENABLED);
+    }
+
+    public @Nullable MergeEngine getMergeEngine() {
+        return configuration().get(ConfigOptions.TABLE_MERGE_ENGINE);
     }
 
     public TableDescriptor copy(Map<String, String> newProperties) {
@@ -360,21 +405,17 @@ public final class TableDescriptor implements Serializable {
                             originDistribution.getBucketCount().orElse(null),
                             defaultBucketKeyOfPrimaryKeyTable(schema, partitionKeys));
                 } else {
-                    // check the provided bucket key and expected bucket key
-                    List<String> expectedBucketKeys =
-                            defaultBucketKeyOfPrimaryKeyTable(schema, partitionKeys);
+                    // check the provided bucket key
                     List<String> pkColumns = schema.getPrimaryKey().get().getColumnNames();
-
-                    if (expectedBucketKeys.size() != bucketKeys.size()
-                            || !new HashSet<>(expectedBucketKeys).containsAll(bucketKeys)) {
+                    if (!new HashSet<>(pkColumns).containsAll(bucketKeys)) {
                         throw new IllegalArgumentException(
                                 String.format(
-                                        "Currently, bucket keys must be equal to primary keys excluding partition keys for primary-key tables. "
-                                                + "The primary keys are %s, the partition keys are %s, "
-                                                + "the expected bucket keys are %s, but the user-defined bucket keys are %s.",
-                                        pkColumns, partitionKeys, expectedBucketKeys, bucketKeys));
+                                        "Bucket keys must be a subset of primary keys excluding partition "
+                                                + "keys for primary-key tables. The primary keys are %s, the "
+                                                + "partition keys are %s, but "
+                                                + "the user-defined bucket keys are %s.",
+                                        pkColumns, partitionKeys, bucketKeys));
                     }
-
                     return new TableDistribution(
                             originDistribution.getBucketCount().orElse(null), bucketKeys);
                 }

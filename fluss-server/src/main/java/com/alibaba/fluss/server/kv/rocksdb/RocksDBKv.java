@@ -56,7 +56,7 @@ public class RocksDBKv implements AutoCloseable {
      * {@link RocksDB#open(String)} is different from that by {@link
      * RocksDB#getDefaultColumnFamily()}, probably it's a bug of RocksDB java API.
      */
-    private final ColumnFamilyHandle defaultColumnFamily;
+    private final ColumnFamilyHandle defaultColumnFamilyHandle;
 
     /** Our RocksDB database. Currently, one kv tablet, one RocksDB instance. */
     protected final RocksDB db;
@@ -73,7 +73,7 @@ public class RocksDBKv implements AutoCloseable {
         this.db = db;
         this.rocksDBResourceGuard = rocksDBResourceGuard;
         this.writeOptions = optionsContainer.getWriteOptions();
-        this.defaultColumnFamily = defaultColumnFamilyHandle;
+        this.defaultColumnFamilyHandle = defaultColumnFamilyHandle;
     }
 
     public ResourceGuard getResourceGuard() {
@@ -100,17 +100,40 @@ public class RocksDBKv implements AutoCloseable {
         }
     }
 
+    public List<byte[]> prefixLookup(byte[] prefixKey) {
+        List<byte[]> pkList = new ArrayList<>();
+        ReadOptions readOptions = new ReadOptions();
+        RocksIterator iterator = db.newIterator(defaultColumnFamilyHandle, readOptions);
+        try {
+            iterator.seek(prefixKey);
+            while (iterator.isValid() && isPrefixEquals(prefixKey, iterator.key())) {
+                pkList.add(iterator.value());
+                iterator.next();
+            }
+        } finally {
+            readOptions.close();
+            iterator.close();
+        }
+
+        return pkList;
+    }
+
     public List<byte[]> limitScan(Integer limit) {
         List<byte[]> pkList = new ArrayList<>();
         ReadOptions readOptions = new ReadOptions();
-        RocksIterator iterator = db.newIterator(defaultColumnFamily, readOptions);
+        RocksIterator iterator = db.newIterator(defaultColumnFamilyHandle, readOptions);
 
         int count = 0;
-        iterator.seekToFirst();
-        while (iterator.isValid() && count < limit) {
-            pkList.add(iterator.value());
-            iterator.next();
-            count++;
+        try {
+            iterator.seekToFirst();
+            while (iterator.isValid() && count < limit) {
+                pkList.add(iterator.value());
+                iterator.next();
+                count++;
+            }
+        } finally {
+            readOptions.close();
+            iterator.close();
         }
 
         return pkList;
@@ -165,8 +188,8 @@ public class RocksDBKv implements AutoCloseable {
             // Start with default CF ...
             List<ColumnFamilyOptions> columnFamilyOptions = new ArrayList<>();
             RocksDBOperationUtils.addColumnFamilyOptionsToCloseLater(
-                    columnFamilyOptions, defaultColumnFamily);
-            IOUtils.closeQuietly(defaultColumnFamily);
+                    columnFamilyOptions, defaultColumnFamilyHandle);
+            IOUtils.closeQuietly(defaultColumnFamilyHandle);
 
             // ... and finally close the DB instance ...
             IOUtils.closeQuietly(db);
@@ -180,5 +203,29 @@ public class RocksDBKv implements AutoCloseable {
 
     public RocksDB getDb() {
         return db;
+    }
+
+    /**
+     * Check if the given first byte array ({@code prefix}) is a prefix of the second byte array
+     * ({@code bytes}).
+     *
+     * @param prefix The prefix byte array
+     * @param bytes The byte array to check if it has the prefix
+     * @return true if the given bytes has the given prefix, false otherwise
+     */
+    public static boolean isPrefixEquals(byte[] prefix, byte[] bytes) {
+        // TODO, This is very inefficient to compare arrays byte by byte. In the future we can
+        // use JDK9 Arrays.compare(compare(byte[] a, int aFromIndex, int aToIndex, byte[] b, int
+        // bFromIndex, int bToIndex)) to instead. See issue:
+        // https://github.com/alibaba/fluss/issues/271
+        if (prefix.length > bytes.length) {
+            return false;
+        }
+        for (int i = 0; i < prefix.length; i++) {
+            if (prefix[i] != bytes[i]) {
+                return false;
+            }
+        }
+        return true;
     }
 }

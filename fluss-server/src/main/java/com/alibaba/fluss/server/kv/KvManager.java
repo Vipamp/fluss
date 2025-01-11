@@ -19,9 +19,12 @@ package com.alibaba.fluss.server.kv;
 import com.alibaba.fluss.config.ConfigOptions;
 import com.alibaba.fluss.config.Configuration;
 import com.alibaba.fluss.exception.KvStorageException;
+import com.alibaba.fluss.fs.FileSystem;
+import com.alibaba.fluss.fs.FsPath;
 import com.alibaba.fluss.memory.LazyMemorySegmentPool;
 import com.alibaba.fluss.memory.MemorySegmentPool;
 import com.alibaba.fluss.metadata.KvFormat;
+import com.alibaba.fluss.metadata.MergeEngine;
 import com.alibaba.fluss.metadata.PhysicalTablePath;
 import com.alibaba.fluss.metadata.TableBucket;
 import com.alibaba.fluss.metadata.TableDescriptor;
@@ -39,9 +42,11 @@ import com.alibaba.fluss.utils.types.Tuple2;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import javax.annotation.Nullable;
 import javax.annotation.concurrent.ThreadSafe;
 
 import java.io.File;
+import java.io.IOException;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
@@ -74,21 +79,29 @@ public final class KvManager extends TabletManagerBase {
     /** The memory segment pool to allocate memorySegment. */
     private final MemorySegmentPool memorySegmentPool;
 
+    private final FsPath remoteKvDir;
+
+    private final FileSystem remoteFileSystem;
+
     private KvManager(
             File dataDir,
             Configuration conf,
             ZooKeeperClient zkClient,
             int recoveryThreadsPerDataDir,
-            LogManager logManager) {
+            LogManager logManager)
+            throws IOException {
         super(TabletType.KV, dataDir, conf, recoveryThreadsPerDataDir);
         this.logManager = logManager;
         this.arrowBufferAllocator = new RootAllocator(Long.MAX_VALUE);
         this.memorySegmentPool = LazyMemorySegmentPool.create(conf);
         this.zkClient = zkClient;
+        this.remoteKvDir = FlussPaths.remoteKvDir(conf);
+        this.remoteFileSystem = remoteKvDir.getFileSystem();
     }
 
     public static KvManager create(
-            Configuration conf, ZooKeeperClient zkClient, LogManager logManager) {
+            Configuration conf, ZooKeeperClient zkClient, LogManager logManager)
+            throws IOException {
         String dataDirString = conf.getString(ConfigOptions.DATA_DIR);
         File dataDir = new File(dataDirString).getAbsoluteFile();
         return new KvManager(
@@ -130,12 +143,14 @@ public final class KvManager extends TabletManagerBase {
      * @param tableBucket the table bucket
      * @param logTablet the cdc log tablet of the kv tablet
      * @param kvFormat the kv format
+     * @param mergeEngine the merge engine
      */
     public KvTablet getOrCreateKv(
             PhysicalTablePath tablePath,
             TableBucket tableBucket,
             LogTablet logTablet,
-            KvFormat kvFormat)
+            KvFormat kvFormat,
+            @Nullable MergeEngine mergeEngine)
             throws Exception {
         return inLock(
                 tabletCreationOrDeletionLock,
@@ -153,7 +168,8 @@ public final class KvManager extends TabletManagerBase {
                                     conf,
                                     arrowBufferAllocator,
                                     memorySegmentPool,
-                                    kvFormat);
+                                    kvFormat,
+                                    mergeEngine);
                     currentKvs.put(tableBucket, tablet);
 
                     LOG.info(
@@ -254,7 +270,8 @@ public final class KvManager extends TabletManagerBase {
                         conf,
                         arrowBufferAllocator,
                         memorySegmentPool,
-                        tableDescriptor.getKvFormat());
+                        tableDescriptor.getKvFormat(),
+                        tableDescriptor.getMergeEngine());
         if (this.currentKvs.containsKey(tableBucket)) {
             throw new IllegalStateException(
                     String.format(
@@ -269,5 +286,22 @@ public final class KvManager extends TabletManagerBase {
         }
         this.currentKvs.put(tableBucket, kvTablet);
         return kvTablet;
+    }
+
+    public void deleteRemoteKvSnapshot(
+            PhysicalTablePath physicalTablePath, TableBucket tableBucket) {
+        FsPath remoteKvTabletDir =
+                FlussPaths.remoteKvTabletDir(remoteKvDir, physicalTablePath, tableBucket);
+        try {
+            if (remoteFileSystem.exists(remoteKvTabletDir)) {
+                remoteFileSystem.delete(remoteKvTabletDir, true);
+                LOG.info("Delete table's remote bucket snapshot dir of {} success.", tableBucket);
+            }
+        } catch (Exception e) {
+            LOG.error(
+                    "Delete table's remote bucket snapshot dir of {} failed.",
+                    remoteKvTabletDir,
+                    e);
+        }
     }
 }
