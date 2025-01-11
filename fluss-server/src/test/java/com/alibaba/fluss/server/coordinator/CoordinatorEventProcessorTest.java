@@ -117,7 +117,7 @@ class CoordinatorEventProcessorTest {
     private CompletedSnapshotStoreManager completedSnapshotStoreManager;
     private AutoPartitionManager autoPartitionManager;
 
-    private RemoteStorageHandler remoteStorageHandler;
+    private RemoteStorageCleaner remoteStorageCleaner;
 
     @BeforeAll
     static void baseBeforeAll() throws Exception {
@@ -143,11 +143,11 @@ class CoordinatorEventProcessorTest {
                 new AutoPartitionManager(serverMetadataCache, zookeeperClient, new Configuration());
         Configuration conf = new Configuration();
         conf.setString(ConfigOptions.REMOTE_DATA_DIR, "/tmp/fluss/remote-data");
-        remoteStorageHandler = new RemoteStorageHandler(conf);
+        remoteStorageCleaner = new RemoteStorageCleaner(conf);
         eventProcessor =
                 new CoordinatorEventProcessor(
                         zookeeperClient,
-                        remoteStorageHandler,
+                        remoteStorageCleaner,
                         serverMetadataCache,
                         testCoordinatorChannelManager,
                         completedSnapshotStoreManager,
@@ -207,7 +207,7 @@ class CoordinatorEventProcessorTest {
         eventProcessor =
                 new CoordinatorEventProcessor(
                         zookeeperClient,
-                        remoteStorageHandler,
+                        remoteStorageCleaner,
                         serverMetadataCache,
                         testCoordinatorChannelManager,
                         completedSnapshotStoreManager,
@@ -398,7 +398,7 @@ class CoordinatorEventProcessorTest {
         eventProcessor =
                 new CoordinatorEventProcessor(
                         zookeeperClient,
-                        remoteStorageHandler,
+                        remoteStorageCleaner,
                         serverMetadataCache,
                         testCoordinatorChannelManager,
                         completedSnapshotStoreManager,
@@ -447,7 +447,7 @@ class CoordinatorEventProcessorTest {
         eventProcessor =
                 new CoordinatorEventProcessor(
                         zookeeperClient,
-                        remoteStorageHandler,
+                        remoteStorageCleaner,
                         serverMetadataCache,
                         testCoordinatorChannelManager,
                         completedSnapshotStoreManager,
@@ -634,7 +634,7 @@ class CoordinatorEventProcessorTest {
         eventProcessor =
                 new CoordinatorEventProcessor(
                         zookeeperClient,
-                        remoteStorageHandler,
+                        remoteStorageCleaner,
                         serverMetadataCache,
                         testCoordinatorChannelManager,
                         completedSnapshotStoreManager,
@@ -758,8 +758,13 @@ class CoordinatorEventProcessorTest {
                 Duration.ofMinutes(1),
                 () -> assertThat(zookeeperClient.getTableAssignment(tableId)).isEmpty());
         // no replica and bucket for the table/partition should exist in the context
-        assertThat(coordinatorContext.getAllBucketsForTable(tableId)).isEmpty();
-        assertThat(coordinatorContext.getAllReplicasForTable(tableId)).isEmpty();
+        retry(
+                Duration.ofMinutes(1),
+                () -> assertThat(coordinatorContext.getAllBucketsForTable(tableId)).isEmpty());
+
+        retry(
+                Duration.ofMinutes(1),
+                () -> assertThat(coordinatorContext.getAllReplicasForTable(tableId)).isEmpty());
     }
 
     private void verifyPartitionDropped(

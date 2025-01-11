@@ -27,38 +27,31 @@ import org.slf4j.LoggerFactory;
 
 import java.io.IOException;
 
-public class RemoteStorageHandler {
+/** A cleaner for cleaning kv snapshots and log segments files of table. */
+public class RemoteStorageCleaner {
 
-    private static final Logger LOG = LoggerFactory.getLogger(RemoteStorageHandler.class);
+    private static final Logger LOG = LoggerFactory.getLogger(RemoteStorageCleaner.class);
 
     private final FsPath remoteKvDir;
+
+    private final FsPath remoteLogDir;
+
     private final FileSystem remoteFileSystem;
 
-    public RemoteStorageHandler(Configuration configuration) throws IOException {
+    public RemoteStorageCleaner(Configuration configuration) throws IOException {
         this.remoteKvDir = FlussPaths.remoteKvDir(configuration);
+        this.remoteLogDir = FlussPaths.remoteLogDir(configuration);
         this.remoteFileSystem = remoteKvDir.getFileSystem();
     }
 
-    public void createTableKvDir(TablePath tablePath, long tableId) throws IOException {
-        remoteFileSystem.mkdirs(tableKvDir(tablePath, tableId));
-    }
-
-    public void deleteTable(TablePath tablePath, long tableId) {
-        deleteDir(tableKvDir(tablePath, tableId));
-        // todo delete log segments file dirs of table.
-    }
-
-    public boolean isTableKvDirExists(TablePath tablePath, long tableId) throws IOException {
-        return isDirExists(tableKvDir(tablePath, tableId));
-    }
-
-    private boolean isDirExists(FsPath fsPath) throws IOException {
-        return remoteFileSystem.exists(fsPath);
+    public void deleteTableRemoteDir(TablePath tablePath, long tableId) {
+        deleteDir(tableKvRemoteDir(tablePath, tableId));
+        deleteDir(tableLogRemoteDir(tablePath, tableId));
     }
 
     private void deleteDir(FsPath fsPath) {
         try {
-            if (isDirExists(fsPath)) {
+            if (remoteFileSystem.exists(fsPath)) {
                 remoteFileSystem.delete(fsPath, true);
                 LOG.info("Delete table's remote dir {} success.", fsPath);
             }
@@ -67,7 +60,11 @@ public class RemoteStorageHandler {
         }
     }
 
-    private FsPath tableKvDir(TablePath tablePath, long tableId) {
+    private FsPath tableKvRemoteDir(TablePath tablePath, long tableId) {
         return FlussPaths.remoteTableDir(remoteKvDir, tablePath, tableId);
+    }
+
+    private FsPath tableLogRemoteDir(TablePath tablePath, long tableId) {
+        return FlussPaths.remoteTableDir(remoteLogDir, tablePath, tableId);
     }
 }

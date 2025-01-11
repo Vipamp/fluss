@@ -29,7 +29,7 @@ import com.alibaba.fluss.server.coordinator.CoordinatorContext;
 import com.alibaba.fluss.server.coordinator.CoordinatorEventProcessor;
 import com.alibaba.fluss.server.coordinator.CoordinatorRequestBatch;
 import com.alibaba.fluss.server.coordinator.CoordinatorTestUtils;
-import com.alibaba.fluss.server.coordinator.RemoteStorageHandler;
+import com.alibaba.fluss.server.coordinator.RemoteStorageCleaner;
 import com.alibaba.fluss.server.coordinator.TestCoordinatorChannelManager;
 import com.alibaba.fluss.server.coordinator.event.CoordinatorEventManager;
 import com.alibaba.fluss.server.metadata.ServerMetadataCache;
@@ -78,7 +78,7 @@ class TableBucketStateMachineTest {
     private CoordinatorRequestBatch coordinatorRequestBatch;
     private CompletedSnapshotStoreManager completedSnapshotStoreManager;
     private AutoPartitionManager autoPartitionManager;
-    private RemoteStorageHandler remoteStorageHandler;
+    private RemoteStorageCleaner remoteStorageCleaner;
 
     @BeforeAll
     static void baseBeforeAll() {
@@ -105,7 +105,7 @@ class TableBucketStateMachineTest {
         completedSnapshotStoreManager = new CompletedSnapshotStoreManager(1, 1, zookeeperClient);
         autoPartitionManager =
                 new AutoPartitionManager(serverMetadataCache, zookeeperClient, new Configuration());
-        remoteStorageHandler = new RemoteStorageHandler(conf);
+        remoteStorageCleaner = new RemoteStorageCleaner(conf);
     }
 
     @Test
@@ -232,7 +232,7 @@ class TableBucketStateMachineTest {
         CoordinatorEventProcessor coordinatorEventProcessor =
                 new CoordinatorEventProcessor(
                         zookeeperClient,
-                        remoteStorageHandler,
+                        remoteStorageCleaner,
                         serverMetadataCache,
                         new CoordinatorChannelManager(
                                 RpcClient.create(

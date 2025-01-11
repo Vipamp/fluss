@@ -180,11 +180,10 @@ public class CoordinatorServer extends ServerBase {
             // up.
             // in HA for coordinator server, the processor also need to know the leader node during
             // start up
-            RemoteStorageHandler remoteStorageHandler = new RemoteStorageHandler(conf);
             this.coordinatorEventProcessor =
                     new CoordinatorEventProcessor(
                             zkClient,
-                            remoteStorageHandler,
+                            new RemoteStorageCleaner(conf),
                             metadataCache,
                             coordinatorChannelManager,
                             bucketSnapshotManager,

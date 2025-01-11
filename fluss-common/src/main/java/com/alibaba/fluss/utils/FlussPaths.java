@@ -602,8 +602,7 @@ public class FlussPaths {
      *
      * </pre>
      *
-     * @param remoteKvOrLogBaseDir - the remote kv snapshots or log segments root dir of specific
-     *     table.
+     * @param remoteKvOrLogBaseDir - the remote kv snapshots or log segments root dir of table.
      * @param tablePath - table path.
      * @param tableId - table id.
      */

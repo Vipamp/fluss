@@ -18,11 +18,15 @@ package com.alibaba.fluss.server.replica;
 
 import com.alibaba.fluss.config.ConfigOptions;
 import com.alibaba.fluss.config.Configuration;
+import com.alibaba.fluss.fs.FsPath;
 import com.alibaba.fluss.metadata.TableBucket;
 import com.alibaba.fluss.metadata.TablePath;
 import com.alibaba.fluss.record.KvRecordBatch;
 import com.alibaba.fluss.rpc.gateway.TabletServerGateway;
 import com.alibaba.fluss.rpc.messages.PutKvRequest;
+import com.alibaba.fluss.server.coordinator.CoordinatorEventProcessor;
+import com.alibaba.fluss.server.coordinator.CoordinatorServer;
+import com.alibaba.fluss.server.coordinator.event.DropTableEvent;
 import com.alibaba.fluss.server.entity.StopReplicaData;
 import com.alibaba.fluss.server.entity.StopReplicaResultForBucket;
 import com.alibaba.fluss.server.kv.snapshot.CompletedSnapshot;
@@ -31,6 +35,7 @@ import com.alibaba.fluss.server.tablet.TabletServer;
 import com.alibaba.fluss.server.testutils.FlussClusterExtension;
 import com.alibaba.fluss.server.testutils.KvTestUtils;
 import com.alibaba.fluss.server.testutils.RpcMessageTestUtils;
+import com.alibaba.fluss.utils.FlussPaths;
 import com.alibaba.fluss.utils.types.Tuple2;
 
 import org.junit.jupiter.api.BeforeEach;
@@ -38,6 +43,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.RegisterExtension;
 
 import java.io.File;
+import java.lang.reflect.Field;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Collections;
@@ -68,12 +74,21 @@ class KvSnapshotITCase {
                     .build();
 
     private ZooKeeperCompletedSnapshotHandleStore completedSnapshotHandleStore;
+    private CoordinatorEventProcessor eventProcessor;
+    private String remoteDataDir;
 
     @BeforeEach
-    void beforeEach() {
+    void beforeEach() throws NoSuchFieldException, IllegalAccessException {
         completedSnapshotHandleStore =
                 new ZooKeeperCompletedSnapshotHandleStore(
                         FLUSS_CLUSTER_EXTENSION.getZooKeeperClient());
+        CoordinatorServer coordinatorServer = FLUSS_CLUSTER_EXTENSION.getCoordinatorServer();
+        Field coordinatorEventProcessorField =
+                coordinatorServer.getClass().getDeclaredField("coordinatorEventProcessor");
+        coordinatorEventProcessorField.setAccessible(true);
+        eventProcessor =
+                (CoordinatorEventProcessor) coordinatorEventProcessorField.get(coordinatorServer);
+        remoteDataDir = FLUSS_CLUSTER_EXTENSION.getRemoteDataDir();
     }
 
     @Test
@@ -189,6 +204,103 @@ class KvSnapshotITCase {
         for (File bucketDir : bucketDirs) {
             assertThat(bucketDir.exists()).isFalse();
         }
+    }
+
+    @Test
+    void testKvSnapshotAndDeleteTable() throws Exception {
+        List<TableBucket> tableBuckets = new ArrayList<>();
+        TablePath tablePath = TablePath.of("test_db", "test_table");
+        long tableId =
+                RpcMessageTestUtils.createTable(
+                        FLUSS_CLUSTER_EXTENSION,
+                        tablePath,
+                        DATA1_TABLE_INFO_PK.getTableDescriptor());
+        for (int bucket = 0; bucket < BUCKET_NUM; bucket++) {
+            tableBuckets.add(new TableBucket(tableId, bucket));
+        }
+        for (TableBucket tableBucket : tableBuckets) {
+            int bucket = tableBucket.getBucket();
+            TableBucket tb = new TableBucket(tableId, bucket);
+            FLUSS_CLUSTER_EXTENSION.waitAndGetLeaderReplica(tb);
+            // get the leader server
+            int leaderServer = FLUSS_CLUSTER_EXTENSION.waitAndGetLeader(tb);
+
+            // put one kv batch
+            KvRecordBatch kvRecordBatch =
+                    genKvRecordBatch(
+                            Tuple2.of("k1", new Object[] {1, "k1"}),
+                            Tuple2.of("k2", new Object[] {2, "k2"}));
+
+            PutKvRequest putKvRequest =
+                    RpcMessageTestUtils.newPutKvRequest(tableId, bucket, 1, kvRecordBatch);
+
+            TabletServerGateway leaderGateway =
+                    FLUSS_CLUSTER_EXTENSION.newTabletServerClientForNode(leaderServer);
+            leaderGateway.putKv(putKvRequest).get();
+
+            // wait for snapshot is available
+            final long snapshot1Id = 0;
+            CompletedSnapshot completedSnapshot =
+                    waitValue(
+                                    () -> completedSnapshotHandleStore.get(tb, snapshot1Id),
+                                    Duration.ofMinutes(2),
+                                    "Fail to wait for the snapshot 0 for bucket " + tb)
+                            .retrieveCompleteSnapshot();
+
+            // check snapshot
+            List<Tuple2<byte[], byte[]>> expectedKeyValues =
+                    getKeyValuePairs(
+                            genKvRecords(
+                                    Tuple2.of("k1", new Object[] {1, "k1"}),
+                                    Tuple2.of("k2", new Object[] {2, "k2"})));
+            KvTestUtils.checkSnapshot(completedSnapshot, expectedKeyValues, 2);
+
+            // put kv batch again
+            kvRecordBatch =
+                    genKvRecordBatch(
+                            Tuple2.of("k1", new Object[] {1, "k11"}),
+                            Tuple2.of("k2", null),
+                            Tuple2.of("k3", new Object[] {3, "k3"}));
+            putKvRequest = RpcMessageTestUtils.newPutKvRequest(tableId, bucket, 1, kvRecordBatch);
+            leaderGateway.putKv(putKvRequest).get();
+
+            // wait for next snapshot is available
+            final long snapshot2Id = 1;
+            completedSnapshot =
+                    waitValue(
+                                    () -> completedSnapshotHandleStore.get(tb, snapshot2Id),
+                                    Duration.ofMinutes(2),
+                                    "Fail to wait for the snapshot 0 for bucket " + tb)
+                            .retrieveCompleteSnapshot();
+
+            // check snapshot
+            expectedKeyValues =
+                    getKeyValuePairs(
+                            genKvRecords(
+                                    Tuple2.of("k1", new Object[] {1, "k11"}),
+                                    Tuple2.of("k3", new Object[] {3, "k3"})));
+            KvTestUtils.checkSnapshot(completedSnapshot, expectedKeyValues, 6);
+
+            // check min retain offset
+            for (TabletServer server : FLUSS_CLUSTER_EXTENSION.getTabletServers()) {
+                Replica replica = server.getReplicaManager().getReplicaOrException(tb);
+                // all replica min retain offset should equal to snapshot offset.
+                // use retry here because the follower min retain offset is updated asynchronously
+                retry(
+                        Duration.ofMinutes(1),
+                        () ->
+                                assertThat(replica.getLogTablet().getMinRetainOffset())
+                                        .as("Replica %s min retain offset", replica)
+                                        .isEqualTo(6));
+            }
+        }
+        eventProcessor.process(new DropTableEvent(tableId, false));
+        FsPath fsPath =
+                FlussPaths.remoteTableDir(
+                        FsPath.fromLocalFile(new File(remoteDataDir)), tablePath, tableId);
+        retry(
+                Duration.ofMinutes(1),
+                () -> assertThat(new File(fsPath.getPath()).exists()).isFalse());
     }
 
     private static Configuration initConfig() {

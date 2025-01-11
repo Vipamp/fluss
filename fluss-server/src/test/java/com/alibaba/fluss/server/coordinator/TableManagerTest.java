@@ -73,8 +73,6 @@ class TableManagerTest {
     private TestingEventManager testingEventManager;
     private TestCoordinatorChannelManager testCoordinatorChannelManager;
 
-    private RemoteStorageHandler remoteStorageHandler;
-
     @BeforeAll
     static void baseBeforeAll() {
         zookeeperClient =
@@ -101,7 +99,6 @@ class TableManagerTest {
         testCoordinatorChannelManager = new TestCoordinatorChannelManager();
         Configuration conf = new Configuration();
         conf.setString(ConfigOptions.REMOTE_DATA_DIR, "/tmp/fluss/remote-data");
-        remoteStorageHandler = new RemoteStorageHandler(conf);
         CoordinatorRequestBatch coordinatorRequestBatch =
                 new CoordinatorRequestBatch(testCoordinatorChannelManager, testingEventManager);
         ReplicaStateMachine replicaStateMachine =
@@ -116,7 +113,7 @@ class TableManagerTest {
                         coordinatorContext,
                         replicaStateMachine,
                         tableBucketStateMachine,
-                        remoteStorageHandler);
+                        new RemoteStorageCleaner(conf));
         tableManager.startup();
 
         coordinatorContext.setLiveTabletServers(
@@ -152,9 +149,6 @@ class TableManagerTest {
 
         tableManager.onCreateNewTable(DATA1_TABLE_PATH_PK, tableId, assignment);
 
-        // mock table kv root dir.
-        remoteStorageHandler.createTableKvDir(DATA1_TABLE_PATH_PK, tableId);
-
         // now, delete the created table
         coordinatorContext.queueTableDeletion(Collections.singleton(tableId));
         tableManager.onDeleteTable(tableId);
@@ -172,9 +166,6 @@ class TableManagerTest {
         assertThat(zookeeperClient.getTableAssignment(tableId)).isEmpty();
         // the table will also be removed from coordinator context
         assertThat(coordinatorContext.getAllReplicasForTable(tableId)).isEmpty();
-
-        // the table's remote kv root dir should be removed.
-        assertThat(remoteStorageHandler.isTableKvDirExists(DATA1_TABLE_PATH_PK, tableId)).isFalse();
     }
 
     @Test
